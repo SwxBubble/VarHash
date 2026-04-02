@@ -9,8 +9,9 @@ chunk_meta_path = "./test_data/default.meta"
 file_meta_path = "./test_data/default.file"
 
 [feature]
-# one of finesse, odess, n-transform, palantir, bestfit
+# one of finesse, odess, n-transform, palantir, bestfit, varhash
 type = "odess"
+top_k_candidates = 1
 
 [chunker]
 # one of fast-cdc, rabin-cdc
@@ -22,3 +23,4 @@ stop_mask = 8191 # 1 << 13 - 1, only for fast cdc
 [storage]
 encoder = "xdelta"
 cache_size = 500 #mb
+min_gain_bytes = 1

@@ -2,6 +2,7 @@
 #include "encoder/encoder.h"
 #include "storage/cache.h"
 #include <cstdio>
+#include <mutex>
 #include <memory>
 #include <string>
 namespace Delta {
@@ -35,11 +36,14 @@ public:
   std::shared_ptr<Chunk> GetChunkContent(chunk_id id);
   std::shared_ptr<Chunk> GetDeltaEncodedChunk(std::shared_ptr<Chunk> chunk,
                                               chunk_id base_chunk_id);
+  size_t GetDeltaEncodedSize(std::shared_ptr<Chunk> chunk, chunk_id base_chunk_id);
 
 private:
+  std::shared_ptr<Chunk> GetChunkContentLocked(chunk_id id);
   std::unique_ptr<Encoder> encoder_;
   ChunkCache cache_;
   FILE *data_ = nullptr;
   FILE *meta_ = nullptr;
+  std::mutex mu_;
 };
 } // namespace Delta

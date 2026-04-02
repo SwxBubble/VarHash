@@ -2,9 +2,17 @@
 #include "chunk/chunk.h"
 #include "utils/gear.h"
 #include "utils/rabin.cpp"
+#include "utils/sha1.h"
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <limits>
 #include <queue>
+#include <sstream>
+#include <unordered_map>
 namespace Delta {
 Feature FinesseFeature::operator()(std::shared_ptr<Chunk> chunk) {
   int sub_chunk_length = chunk->len() / (sf_subf_ * sf_cnt_);
@@ -167,5 +175,194 @@ Feature PalantirFeature::operator()(std::shared_ptr<Chunk> chunk) {
   results.push_back(group(4, 3));
   results.push_back(group(6, 2));
   return results;
+}
+
+namespace {
+constexpr int kHistogramBins = 16;
+
+uint64_t SplitMix64(uint64_t x) {
+  x += 0x9e3779b97f4a7c15ULL;
+  x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
+  return x ^ (x >> 31U);
+}
+
+std::string DigestToHex(const SHA1_digest &digest) {
+  std::ostringstream oss;
+  oss << std::hex << std::setfill('0');
+  for (int i = 0; i < 20; ++i) {
+    oss << std::setw(2) << static_cast<int>(digest.d_[i]);
+  }
+  return oss.str();
+}
+
+double ByteEntropy(const std::array<uint64_t, 256> &counts, int total) {
+  if (total <= 0) {
+    return 0.0;
+  }
+  double entropy = 0.0;
+  for (uint64_t count : counts) {
+    if (count == 0) {
+      continue;
+    }
+    double p = static_cast<double>(count) / static_cast<double>(total);
+    entropy -= p * std::log2(p);
+  }
+  return entropy / 8.0;
+}
+
+std::vector<double> BuildDescriptor(const std::shared_ptr<Chunk> &chunk,
+                                    int segment_count) {
+  const int length = chunk->len();
+  auto *buf = chunk->buf();
+  std::array<uint64_t, 256> raw_histogram{};
+  std::array<double, kHistogramBins> coarse_histogram{};
+  std::vector<double> descriptor;
+  descriptor.reserve(kHistogramBins + segment_count * 4 + 4);
+
+  uint64_t nonzero_count = 0;
+  uint64_t transition_sum = 0;
+  uint64_t transition_large_count = 0;
+  uint64_t byte_sum = 0;
+  for (int i = 0; i < length; ++i) {
+    uint8_t value = buf[i];
+    raw_histogram[value]++;
+    coarse_histogram[value / (256 / kHistogramBins)] += 1.0;
+    byte_sum += value;
+    if (value != 0) {
+      nonzero_count++;
+    }
+    if (i > 0) {
+      auto diff = static_cast<uint32_t>(std::abs(buf[i] - buf[i - 1]));
+      transition_sum += diff;
+      if (diff >= 16) {
+        transition_large_count++;
+      }
+    }
+  }
+
+  double inv_length = length > 0 ? 1.0 / static_cast<double>(length) : 0.0;
+  for (double &bin : coarse_histogram) {
+    bin *= inv_length;
+    descriptor.push_back(bin);
+  }
+
+  int segment_len =
+      std::max(1, (length + std::max(1, segment_count) - 1) / std::max(1, segment_count));
+  for (int segment = 0; segment < std::max(1, segment_count); ++segment) {
+    int start = segment * segment_len;
+    if (start >= length) {
+      descriptor.insert(descriptor.end(), {0.0, 0.0, 0.0, 0.0});
+      continue;
+    }
+    int end = std::min(length, start + segment_len);
+    double local_sum = 0.0;
+    double local_square_sum = 0.0;
+    double local_transition = 0.0;
+    uint64_t rolling_min = std::numeric_limits<uint64_t>::max();
+    uint64_t rolling = 0;
+    int local_count = end - start;
+    for (int i = start; i < end; ++i) {
+      double value = static_cast<double>(buf[i]) / 255.0;
+      local_sum += value;
+      local_square_sum += value * value;
+      rolling = (rolling << 1U) + GEAR_TABLE[buf[i]];
+      rolling_min = std::min<uint64_t>(rolling_min, rolling);
+      if (i > start) {
+        local_transition += static_cast<double>(std::abs(buf[i] - buf[i - 1])) / 255.0;
+      }
+    }
+    double mean = local_count > 0 ? local_sum / local_count : 0.0;
+    double variance = local_count > 0 ? std::max(0.0, local_square_sum / local_count - mean * mean) : 0.0;
+    double transition = local_count > 1 ? local_transition / (local_count - 1) : 0.0;
+    double anchor = rolling_min == std::numeric_limits<uint64_t>::max()
+                        ? 0.0
+                        : static_cast<double>(rolling_min & 0xFFFFU) / 65535.0;
+    descriptor.push_back(mean);
+    descriptor.push_back(variance);
+    descriptor.push_back(transition);
+    descriptor.push_back(anchor);
+  }
+
+  descriptor.push_back(static_cast<double>(length) / 16384.0);
+  descriptor.push_back(length > 0 ? static_cast<double>(byte_sum) / static_cast<double>(length) / 255.0 : 0.0);
+  descriptor.push_back(length > 0 ? static_cast<double>(nonzero_count) / static_cast<double>(length) : 0.0);
+  descriptor.push_back(length > 1 ? static_cast<double>(transition_sum) / static_cast<double>(length - 1) / 255.0 : 0.0);
+  descriptor.push_back(length > 1 ? static_cast<double>(transition_large_count) / static_cast<double>(length - 1) : 0.0);
+  descriptor.push_back(ByteEntropy(raw_histogram, length));
+  return descriptor;
+}
+
+std::vector<uint64_t> DescriptorToHashWords(const std::vector<double> &descriptor,
+                                            int hash_bits) {
+  int word_count = (hash_bits + 63) / 64;
+  std::vector<uint64_t> words(word_count, 0);
+  for (int bit = 0; bit < hash_bits; ++bit) {
+    double score = 0.0;
+    for (size_t dim = 0; dim < descriptor.size(); ++dim) {
+      uint64_t seed = SplitMix64((static_cast<uint64_t>(bit) << 32U) ^
+                                 static_cast<uint64_t>(dim + 1));
+      double weight = static_cast<double>((seed & 0xFFFFU)) / 32767.5 - 1.0;
+      score += descriptor[dim] * weight;
+    }
+    uint64_t bias_seed = SplitMix64(static_cast<uint64_t>(bit) ^ 0xa5a5a5a5U);
+    double bias = static_cast<double>((bias_seed & 0xFFU)) / 255.0 - 0.5;
+    if (score + bias >= 0.0) {
+      words[bit / 64] |= (1ULL << (bit % 64));
+    }
+  }
+  return words;
+}
+
+std::unordered_map<std::string, std::vector<uint64_t>>
+LoadPrecomputedHashes(const std::string &path) {
+  std::unordered_map<std::string, std::vector<uint64_t>> result;
+  if (path.empty()) {
+    return result;
+  }
+  std::ifstream input(path);
+  if (!input) {
+    return result;
+  }
+  std::string line;
+  while (std::getline(input, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    std::istringstream iss(line);
+    std::string digest_hex;
+    iss >> digest_hex;
+    if (digest_hex.empty()) {
+      continue;
+    }
+    std::vector<uint64_t> words;
+    std::string word_hex;
+    while (iss >> word_hex) {
+      std::stringstream converter;
+      converter << std::hex << word_hex;
+      uint64_t value = 0;
+      converter >> value;
+      words.push_back(value);
+    }
+    if (!words.empty()) {
+      result.emplace(std::move(digest_hex), std::move(words));
+    }
+  }
+  return result;
+}
+} // namespace
+
+Feature VarHashFeature::operator()(std::shared_ptr<Chunk> chunk) {
+  static std::unordered_map<std::string, std::vector<uint64_t>> precomputed_hashes =
+      LoadPrecomputedHashes(precomputed_hash_path_);
+  if (!precomputed_hash_path_.empty() && !precomputed_hashes.empty()) {
+    auto digest = DigestToHex(sha1_hash(chunk->buf(), chunk->len()));
+    auto iter = precomputed_hashes.find(digest);
+    if (iter != precomputed_hashes.end()) {
+      return iter->second;
+    }
+  }
+  auto descriptor = BuildDescriptor(chunk, segment_count_);
+  return DescriptorToHashWords(descriptor, hash_bits_);
 }
 } // namespace Delta

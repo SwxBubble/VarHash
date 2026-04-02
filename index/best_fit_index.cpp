@@ -1,6 +1,16 @@
 #include "index/best_fit_index.h"
+#include <algorithm>
 namespace Delta {
 std::optional<chunk_id> BestFitIndex::GetBaseChunkID(const Feature &feat) {
+  auto ids = GetBaseChunkIDs(feat, 1);
+  if (ids.empty()) {
+    return std::nullopt;
+  }
+  return ids.front();
+}
+
+std::vector<chunk_id> BestFitIndex::GetBaseChunkIDs(const Feature &feat,
+                                                    size_t top_k) {
   const auto &features = std::get<std::vector<uint64_t>>(feat);
   std::unordered_map<chunk_id, uint32_t> match_count;
   for (int i = 0; i < feature_count_; i++) {
@@ -13,18 +23,30 @@ std::optional<chunk_id> BestFitIndex::GetBaseChunkID(const Feature &feat) {
       match_count[id]++;
     }
   }
-  if (match_count.empty())
-    return std::nullopt;
-  uint32_t max_match = 0, max_match_id = -1;
-  for (const auto &[chunk_id, count]: match_count) {
-    if (count > max_match) {
-      max_match_id = chunk_id;
-      max_match = count;
+  if (match_count.empty()) {
+    return {};
+  }
+  std::vector<std::pair<chunk_id, uint32_t>> ranked(match_count.begin(),
+                                                    match_count.end());
+  std::sort(ranked.begin(), ranked.end(),
+            [](const auto &lhs, const auto &rhs) {
+              if (lhs.second != rhs.second) {
+                return lhs.second > rhs.second;
+              }
+              return lhs.first < rhs.first;
+            });
+  std::vector<chunk_id> result;
+  result.reserve(std::min(top_k, ranked.size()));
+  for (const auto &[id, count] : ranked) {
+    if (count < 4) {
+      continue;
+    }
+    result.push_back(id);
+    if (result.size() >= top_k) {
+      break;
     }
   }
-  if (max_match < 4)
-    return std::nullopt;
-  return max_match_id;
+  return result;
 }
 
 void BestFitIndex::AddFeature(const Feature &feat, chunk_id id) {

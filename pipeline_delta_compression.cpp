@@ -80,7 +80,7 @@ void PipelineDeltaCompression::ChunkMatchWorker() {
       break;
     if (context_->chunk_type != DuplicateChunk) {
       const auto &feature = context_->feature;
-      auto base_chunk_id = index_->GetBaseChunkID(feature);
+      auto base_chunk_id = SelectBestBaseChunk(context_->chunk, feature);
       if (!base_chunk_id.has_value()) {
         context_->chunk_type = BaseChunk;
         index_->AddFeature(feature, context_->chunk->id());

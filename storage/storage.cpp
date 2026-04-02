@@ -22,6 +22,7 @@ Storage::Storage(std::string DataPath, std::string MetaPath,
 }
 
 void Storage::WriteBaseChunk(std::shared_ptr<Chunk> chunk) {
+  std::lock_guard<std::mutex> lock(mu_);
   ChunkMeta meta;
   meta.offset = ftell(data_);
   meta.base_chunk_id = chunk->id();
@@ -36,17 +37,24 @@ void Storage::WriteBaseChunk(std::shared_ptr<Chunk> chunk) {
 std::shared_ptr<Chunk>
 Storage::GetDeltaEncodedChunk(std::shared_ptr<Chunk> chunk,
                               chunk_id base_chunk_id) {
+  std::lock_guard<std::mutex> lock(mu_);
   auto base_chunk = cache_.get(base_chunk_id);
   if (nullptr == base_chunk) {
-    base_chunk = GetChunkContent(base_chunk_id);
+    base_chunk = GetChunkContentLocked(base_chunk_id);
     cache_.add(base_chunk_id, base_chunk);
   }
   auto delta_chunk = encoder_->encode(base_chunk, chunk);
-  return delta_chunk;
+  return Chunk::FromMemory(delta_chunk->buf(), delta_chunk->len(), chunk->id());
+}
+
+size_t Storage::GetDeltaEncodedSize(std::shared_ptr<Chunk> chunk,
+                                    chunk_id base_chunk_id) {
+  return GetDeltaEncodedChunk(chunk, base_chunk_id)->len();
 }
 
 int Storage::WriteDeltaChunk(std::shared_ptr<Chunk> delta_chunk,
                              chunk_id base_chunk_id) {
+  std::lock_guard<std::mutex> lock(mu_);
   ChunkMeta meta;
   meta.offset = ftell(data_);
   meta.base_chunk_id = base_chunk_id;
@@ -60,7 +68,7 @@ int Storage::WriteDeltaChunk(std::shared_ptr<Chunk> delta_chunk,
   return delta_chunk->len();
 }
 
-std::shared_ptr<Chunk> Storage::GetChunkContent(chunk_id id) {
+std::shared_ptr<Chunk> Storage::GetChunkContentLocked(chunk_id id) {
   // TODO: support recover data content of delta chunk
   uint64_t meta_offset = id * sizeof(ChunkMeta);
   fseek(meta_, meta_offset, SEEK_SET);
@@ -73,16 +81,23 @@ std::shared_ptr<Chunk> Storage::GetChunkContent(chunk_id id) {
   if (meta.type == DeltaChunk) {
     auto base_chunk = cache_.get(meta.base_chunk_id);
     if (nullptr == base_chunk) {
-      base_chunk = GetChunkContent(meta.base_chunk_id);
+      base_chunk = GetChunkContentLocked(meta.base_chunk_id);
       cache_.add(meta.base_chunk_id, base_chunk);
     }
-    return encoder_->decode(base_chunk, raw_content);
+    auto decoded_chunk = encoder_->decode(base_chunk, raw_content);
+    return Chunk::FromMemory(decoded_chunk->buf(), decoded_chunk->len(), id);
   }
   return raw_content;
 }
 
+std::shared_ptr<Chunk> Storage::GetChunkContent(chunk_id id) {
+  std::lock_guard<std::mutex> lock(mu_);
+  return GetChunkContentLocked(id);
+}
+
 void Storage::WriteDuplicateChunk(std::shared_ptr<Chunk> chunk,
                                   chunk_id base_chunk_id) {
+  std::lock_guard<std::mutex> lock(mu_);
   ChunkMeta meta;
   meta.base_chunk_id = base_chunk_id;
   meta.size = chunk->len();

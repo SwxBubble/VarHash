@@ -6,7 +6,9 @@
 #include "storage/storage.h"
 #include "dedup/dedup.h"
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 namespace Delta {
 class DeltaCompression {
 public:
@@ -35,5 +37,10 @@ protected:
   size_t total_size_compressed_ = 0;
   size_t chunk_size_before_delta_ = 0;
   size_t chunk_size_after_delta_ = 0;
+
+  std::optional<chunk_id> SelectBestBaseChunk(const std::shared_ptr<Chunk> &chunk,
+                                              const Feature &feature);
+  size_t top_k_candidates_ = 1;
+  size_t min_gain_bytes_ = 1;
 };
 } // namespace Delta

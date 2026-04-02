@@ -4,17 +4,45 @@
 #include <assert.h>
 #include <fstream>
 #include <glog/logging.h>
+#include <algorithm>
 namespace Delta {
 using chunk_id = uint32_t;
 std::optional<chunk_id>
 SuperFeatureIndex::GetBaseChunkID(const Feature &feat) {
+  auto ids = GetBaseChunkIDs(feat, 1);
+  if (ids.empty()) {
+    return std::nullopt;
+  }
+  return ids.front();
+}
+
+std::vector<chunk_id> SuperFeatureIndex::GetBaseChunkIDs(const Feature &feat,
+                                                         size_t top_k) {
   const auto &super_feature = std::get<std::vector<uint64_t>>(feat);
-  std::optional<chunk_id> result = std::nullopt;
+  std::unordered_map<chunk_id, uint32_t> match_count;
   for (int i = 0; i < super_feature_count_; i++) {
-    // get a matched super feature
-    if (index_[i].count(super_feature[i])) {
-      // first fit
-      result = index_[i][super_feature[i]];
+    if (!index_[i].count(super_feature[i])) {
+      continue;
+    }
+    match_count[index_[i][super_feature[i]]]++;
+  }
+  std::vector<std::pair<chunk_id, uint32_t>> ranked(match_count.begin(),
+                                                    match_count.end());
+  std::sort(ranked.begin(), ranked.end(),
+            [](const auto &lhs, const auto &rhs) {
+              if (lhs.second != rhs.second) {
+                return lhs.second > rhs.second;
+              }
+              return lhs.first < rhs.first;
+            });
+  std::vector<chunk_id> result;
+  result.reserve(std::min(top_k, ranked.size()));
+  for (const auto &[id, count] : ranked) {
+    if (count == 0) {
+      continue;
+    }
+    result.push_back(id);
+    if (result.size() >= top_k) {
       break;
     }
   }

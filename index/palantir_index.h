@@ -21,6 +21,7 @@ public:
         delete level;
   }
   std::optional<chunk_id> GetBaseChunkID(const Feature &feat);
+  std::vector<chunk_id> GetBaseChunkIDs(const Feature &feat, size_t top_k);
   void AddFeature(const Feature &feat, chunk_id id);
   bool RecoverFromFile(const std::string &path) { return true;}
   bool DumpToFile(const std::string &path) { return true;}

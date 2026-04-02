@@ -1,0 +1,29 @@
+task = "compression"
+pipeline = false
+task_data_dir = "./test_data/glib"
+
+feature_index_path = "./test_data/varhash.index"
+dedup_index_path = "./test_data/varhash.dedup"
+chunk_data_path = "./test_data/varhash.data"
+chunk_meta_path = "./test_data/varhash.meta"
+file_meta_path = "./test_data/varhash.file"
+
+[feature]
+type = "varhash"
+hash_bits = 128
+segment_count = 8
+max_hamming_distance = 16
+top_k_candidates = 8
+# Optional. Each line: "<sha1hex> <word0_hex> <word1_hex> ..."
+precomputed_hash_path = "./test_data/varhash.hashes"
+
+[chunker]
+type = "fast-cdc"
+min_chunk_size = 4096
+max_chunk_size = 16384
+stop_mask = 8191
+
+[storage]
+encoder = "xdelta"
+cache_size = 500
+min_gain_bytes = 32

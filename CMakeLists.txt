@@ -18,3 +18,5 @@ add_library(delta_compression STATIC delta_compression.cpp pipeline_delta_compre
 target_link_libraries(delta_compression chunker feature index storage utils xdelta3 glog gflags)
 add_executable(delta main.cpp recover_file.cpp)
 target_link_libraries(delta delta_compression stdc++fs)
+add_executable(export_candidates export_bootstrap_candidates.cpp)
+target_link_libraries(export_candidates chunker feature index utils glog gflags stdc++fs)

@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 #include <memory>
 #include <variant>
 #include <vector>
@@ -10,6 +11,8 @@ constexpr int default_finesse_sf_subf = 4;
 constexpr int default_odess_sf_cnt = 3;
 constexpr int default_odess_sf_subf = 4;
 constexpr uint64_t default_odess_mask = (1 << 7) - 1;
+constexpr int default_varhash_bits = 128;
+constexpr int default_varhash_segments = 8;
 class Chunk;
 using Feature = std::variant<std::vector<std::vector<uint64_t>>,
                              std::vector<uint64_t>
@@ -77,5 +80,21 @@ public:
   Feature operator()(std::shared_ptr<Chunk> chunk);
 private:
   OdessSubfeatures get_sub_features_;
+};
+
+class VarHashFeature : public FeatureCalculator {
+public:
+  VarHashFeature(int hash_bits = default_varhash_bits,
+                 int segment_count = default_varhash_segments,
+                 std::string precomputed_hash_path = "")
+      : hash_bits_(hash_bits), segment_count_(segment_count),
+        precomputed_hash_path_(std::move(precomputed_hash_path)) {}
+
+  Feature operator()(std::shared_ptr<Chunk> chunk) override;
+
+private:
+  int hash_bits_;
+  int segment_count_;
+  std::string precomputed_hash_path_;
 };
 } // namespace Delta

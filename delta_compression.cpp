@@ -5,6 +5,7 @@
 #include "config.h"
 #include "encoder/xdelta.h"
 #include "index/best_fit_index.h"
+#include "index/hamming_index.h"
 #include "index/palantir_index.h"
 #include "index/super_feature_index.h"
 #include "storage/storage.h"
@@ -14,6 +15,50 @@
 #include <string>
 #include <vector>
 namespace Delta {
+namespace {
+std::string GetConfigStringWithFallback(
+    const std::shared_ptr<cpptoml::table> &config, const std::string &primary,
+    const std::string &fallback = "") {
+  auto value = config->get_as<std::string>(primary);
+  if (value.has_value()) {
+    return *value;
+  }
+  if (!fallback.empty()) {
+    auto fallback_value = config->get_as<std::string>(fallback);
+    if (fallback_value.has_value()) {
+      return *fallback_value;
+    }
+  }
+  return "";
+}
+} // namespace
+
+std::optional<chunk_id>
+DeltaCompression::SelectBestBaseChunk(const std::shared_ptr<Chunk> &chunk,
+                                      const Feature &feature) {
+  auto candidate_ids = index_->GetBaseChunkIDs(feature, top_k_candidates_);
+  if (candidate_ids.empty()) {
+    return std::nullopt;
+  }
+  size_t best_delta_size = chunk->len();
+  std::optional<chunk_id> best_base_id = std::nullopt;
+  for (auto candidate_id : candidate_ids) {
+    auto delta_size = storage_->GetDeltaEncodedSize(chunk, candidate_id);
+    if (delta_size < best_delta_size) {
+      best_delta_size = delta_size;
+      best_base_id = candidate_id;
+    }
+  }
+  if (!best_base_id.has_value()) {
+    return std::nullopt;
+  }
+  auto gain_bytes = chunk->len() - best_delta_size;
+  if (gain_bytes < min_gain_bytes_) {
+    return std::nullopt;
+  }
+  return best_base_id;
+}
+
 void DeltaCompression::AddFile(const std::string &file_name) {
   FileMeta file_meta;
   file_meta.file_name = file_name;
@@ -51,7 +96,7 @@ void DeltaCompression::AddFile(const std::string &file_name) {
     };
 
     auto feature = (*feature_)(chunk);
-    auto base_chunk_id = index_->GetBaseChunkID(feature);
+    auto base_chunk_id = SelectBestBaseChunk(chunk, feature);
     if (!base_chunk_id.has_value()) {
       index_->AddFeature(feature, chunk->id());
       write_base_chunk(chunk);
@@ -101,7 +146,8 @@ DeltaCompression::~DeltaCompression() {
 
 DeltaCompression::DeltaCompression() {
   auto config = Config::Instance().get();
-  auto index_path = *config->get_as<std::string>("index_path");
+  auto index_path = GetConfigStringWithFallback(config, "index_path",
+                                                "feature_index_path");
   auto chunk_data_path = *config->get_as<std::string>("chunk_data_path");
   auto chunk_meta_path = *config->get_as<std::string>("chunk_meta_path");
   auto file_meta_path = *config->get_as<std::string>("file_meta_path");
@@ -132,6 +178,9 @@ DeltaCompression::DeltaCompression() {
 
   auto feature = config->get_table("feature");
   auto feature_type = *feature->get_as<std::string>("type");
+  top_k_candidates_ =
+      static_cast<size_t>(feature->get_as<int64_t>("top_k_candidates")
+                              .value_or<int64_t>(1));
   using FeatureIndex =
       std::pair<std::unique_ptr<FeatureCalculator>, std::unique_ptr<Index>>;
   std::unordered_map<std::string, std::function<FeatureIndex()>>
@@ -143,17 +192,40 @@ DeltaCompression::DeltaCompression() {
           declare_feature_type(palantir, PalantirFeature, PalantirIndex),
           declare_feature_type(bestfit, OdessSubfeatures, BestFitIndex)};
 
-  if (!feature_index_map.count(feature_type))
+  if (feature_type == "varhash") {
+    auto hash_bits =
+        feature->get_as<int64_t>("hash_bits").value_or(default_varhash_bits);
+    auto segment_count = feature->get_as<int64_t>("segment_count")
+                             .value_or(default_varhash_segments);
+    auto precomputed_hash_path =
+        feature->get_as<std::string>("precomputed_hash_path")
+            .value_or(std::string(""));
+    auto max_hamming_distance =
+        feature->get_as<int64_t>("max_hamming_distance")
+            .value_or(std::max<int64_t>(8, hash_bits / 8));
+    this->feature_ = std::make_unique<VarHashFeature>(
+        static_cast<int>(hash_bits), static_cast<int>(segment_count),
+        precomputed_hash_path);
+    this->index_ = std::make_unique<HammingIndex>(
+        static_cast<uint32_t>(max_hamming_distance));
+    LOG(INFO) << "Add VarHash feature, hash_bits=" << hash_bits
+              << " segment_count=" << segment_count
+              << " max_hamming_distance=" << max_hamming_distance;
+  } else if (!feature_index_map.count(feature_type)) {
     LOG(FATAL) << "Unknown feature type " << feature_type;
-  auto [feature_ptr, index_ptr] = feature_index_map[feature_type]();
-  this->feature_ = std::move(feature_ptr);
-  this->index_ = std::move(index_ptr);
+  } else {
+    auto [feature_ptr, index_ptr] = feature_index_map[feature_type]();
+    this->feature_ = std::move(feature_ptr);
+    this->index_ = std::move(index_ptr);
+  }
 
   this->dedup_ = std::make_unique<Dedup>(dedup_index_path);
 
   auto storage = config->get_table("storage");
   auto encoder_name = *storage->get_as<std::string>("encoder");
   auto cache_size = *storage->get_as<int64_t>("cache_size");
+  min_gain_bytes_ = static_cast<size_t>(
+      storage->get_as<int64_t>("min_gain_bytes").value_or<int64_t>(1));
   std::unique_ptr<Encoder> encoder;
   if (encoder_name == "xdelta") {
     encoder = std::make_unique<XDelta>();
