@@ -1,18 +1,10 @@
 import argparse
-import base64
-import json
 from pathlib import Path
 
 import torch
 
+from chunk_store import ChunkStore, load_jsonl
 from model import VarHashNet
-
-
-def load_jsonl(path):
-    with open(path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            if line.strip():
-                yield json.loads(line)
 
 
 def bytes_to_tensor(payload):
@@ -36,8 +28,11 @@ def pack_bits(hash_tensor):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--chunks", required=True)
+    parser.add_argument("--tar-root", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--max-open-tar-files", type=int, default=8)
+    parser.add_argument("--max-cached-chunks", type=int, default=4096)
     args = parser.parse_args()
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
@@ -47,14 +42,23 @@ def main():
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as handle:
-        for record in load_jsonl(args.chunks):
-            payload = base64.b64decode(record["payload_b64"])
-            tensor, lengths = bytes_to_tensor(payload)
-            with torch.no_grad():
-                _, hash_tensor = model(tensor, lengths)
-            words = pack_bits(hash_tensor)
-            handle.write(record["sha1"] + " " + " ".join(words) + "\n")
+    chunk_store = ChunkStore(
+        args.chunks,
+        args.tar_root,
+        max_open_files=args.max_open_tar_files,
+        max_cached_chunks=args.max_cached_chunks,
+    )
+    try:
+        with output_path.open("w", encoding="utf-8") as handle:
+            for record in load_jsonl(args.chunks):
+                payload = chunk_store.get(record["sha1"])
+                tensor, lengths = bytes_to_tensor(payload)
+                with torch.no_grad():
+                    _, hash_tensor = model(tensor, lengths)
+                words = pack_bits(hash_tensor)
+                handle.write(record["sha1"] + " " + " ".join(words) + "\n")
+    finally:
+        chunk_store.close()
 
 
 if __name__ == "__main__":

@@ -1,7 +1,15 @@
 # VarHash offline pipeline
 
-This folder contains a minimal research pipeline for training a semantic hash
-model on variable-size FastCDC chunks cut directly from tar streams.
+This folder contains a more engineering-oriented research pipeline for training
+a semantic hash model on variable-size FastCDC chunks cut directly from tar
+streams.
+
+The key design choice is:
+
+- `chunks.jsonl` is now a lightweight manifest
+- chunk bytes are read on demand from `tar_path + chunk_offset + chunk_length`
+- training, candidate labeling, round-2 mining, and hash export all reuse the
+  same on-demand chunk store
 
 ## Expected inputs
 
@@ -17,10 +25,13 @@ model on variable-size FastCDC chunks cut directly from tar streams.
   "version_order": 3,
   "tar_path": "glib/glib-2.31.tar",
   "chunk_offset": 1048576,
-  "chunk_length": 8192,
-  "payload_b64": "base64 encoded chunk bytes"
+  "chunk_length": 8192
 }
 ```
+
+Unlike the previous prototype, the manifest does **not** embed chunk payloads.
+This keeps the file much smaller and avoids loading millions of chunk bytes into
+memory before they are actually needed.
 
 ### Candidate gain file
 
@@ -61,7 +72,7 @@ to override the default source label.
 - `build_chunk_manifest.py`
   - traverse `tar_versions/<project>/*.tar*`
   - run FastCDC directly on tar byte streams
-  - emit `chunks.jsonl`
+  - emit a metadata-only `chunks.jsonl`
 - `build_candidate_pairs.py`
   - build historical reference candidates from:
     - exact duplicates
@@ -69,6 +80,8 @@ to override the default source label.
     - Finesse top-k
     - random history negatives
     - recent-version offset neighbors
+  - read chunk bytes on demand from tar files
+  - reuse per-worker temp files for `xdelta3`
   - evaluate real `xdelta3` delta size
   - emit `candidate_pairs.jsonl`
 - `build_datasets.py`
@@ -101,10 +114,17 @@ python learning/varhash/build_chunk_manifest.py \
 
 python learning/varhash/build_candidate_pairs.py \
   --chunks runs/chunks.jsonl \
+  --tar-root test_data/tar_versions \
   --output runs/candidate_pairs.jsonl \
   --odess-candidates runs/odess_candidates.jsonl \
   --finesse-candidates runs/finesse_candidates.jsonl \
-  --xdelta3 xdelta3
+  --xdelta3 xdelta3 \
+  --projects gcc \
+  --max-version-order 6 \
+  --max-queries 20000 \
+  --max-candidates-per-query 16 \
+  --random-negatives 0 \
+  --workers 8
 
 python learning/varhash/build_datasets.py \
   --candidates runs/candidate_pairs.jsonl \
@@ -112,17 +132,20 @@ python learning/varhash/build_datasets.py \
 
 python learning/varhash/train.py \
   --chunks runs/chunks.jsonl \
+  --tar-root test_data/tar_versions \
   --query-groups runs/varhash_dataset/query_groups_train.jsonl \
   --checkpoint runs/varhash.pt
 
 python learning/varhash/mine_round2_candidates.py \
   --chunks runs/chunks.jsonl \
+  --tar-root test_data/tar_versions \
   --checkpoint runs/varhash.pt \
   --existing-candidates runs/candidate_pairs.jsonl \
   --output runs/model_mined_candidates.jsonl
 
 python learning/varhash/export_hashes.py \
   --chunks runs/chunks.jsonl \
+  --tar-root test_data/tar_versions \
   --checkpoint runs/varhash.pt \
   --output test_data/varhash.hashes
 ```
@@ -131,6 +154,8 @@ python learning/varhash/export_hashes.py \
 
 - The model input is still tar-stream chunks. We do not unpack tar files for the
   main training path.
+- If you previously generated a payload-heavy `chunks.jsonl`, delete it and
+  rebuild it with the new manifest-only `build_chunk_manifest.py`.
 - `version_order` is only used to enforce historical candidate pools and
   chronological train/val/test splits. It is not part of the model input.
 - `Odess/Finesse` are intentionally not required in the first candidate builder.
@@ -139,6 +164,13 @@ python learning/varhash/export_hashes.py \
 - `build_candidate_pairs.py` now supports all five planned candidate families.
   The offset-neighbor pool can be limited to the previous `N` versions with
   `--recent-version-window`.
+- For large corpora, treat `build_candidate_pairs.py` as a budgeted labeling
+  job. Start with `--projects`, `--max-version-order`, `--max-queries`,
+  `--max-candidates-per-query`, and `--workers` instead of labeling the whole
+  corpus at once.
+- The new labeling path is much lighter than the payload-in-JSONL prototype,
+  but it still runs real `xdelta3` for each selected candidate pair. Budgeted
+  labeling is still the recommended way to build round-1 data.
 - `build_datasets.py` defaults to keeping exact duplicates out of the main
   training pairs while preserving them in side files for analysis.
 - A practical round-2 workflow is:

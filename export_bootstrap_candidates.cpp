@@ -282,12 +282,17 @@ public:
       LOG(FATAL) << "Cannot open output file " << output_path_;
     }
     const auto files = CollectInputFiles(task_data_dir_);
+    if (files.empty()) {
+      LOG(FATAL) << "No input files found under " << task_data_dir_.string();
+    }
+    size_t exported_pairs = 0;
     for (const auto &file : files) {
-      if (!chunker_->ReinitWithFile(file.relative_path.string())) {
-        LOG(WARNING) << "Skip unreadable file " << file.relative_path.string();
+      const auto input_path = (task_data_dir_ / file.relative_path).string();
+      if (!chunker_->ReinitWithFile(input_path)) {
+        LOG(WARNING) << "Skip unreadable file " << input_path;
         continue;
       }
-      LOG(INFO) << "Export candidates for " << file.relative_path.string();
+      LOG(INFO) << "Export candidates for " << input_path;
       uint64_t chunk_offset = 0;
       while (true) {
         auto chunk = chunker_->GetNextChunk();
@@ -325,11 +330,14 @@ public:
               << ",\"query_offset\":" << query_info.chunk_offset
               << ",\"ref_offset\":" << ref_info.chunk_offset
               << ",\"rank\":" << (rank + 1) << "}\n";
+          exported_pairs++;
         }
         index_->AddFeature(feature, chunk->id());
         chunk_offset += static_cast<uint64_t>(chunk->len());
       }
     }
+    LOG(INFO) << "Exported " << exported_pairs << " candidate pairs to "
+              << output_path_;
   }
 
 private:

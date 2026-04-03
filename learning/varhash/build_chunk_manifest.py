@@ -1,8 +1,6 @@
 import argparse
-import base64
 import hashlib
 import json
-import mmap
 import re
 from pathlib import Path
 
@@ -55,21 +53,26 @@ def iter_fastcdc_chunks(file_path, min_size, avg_size, max_size, fat):
         ) from exc
 
     with open(file_path, "rb") as handle:
-        with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
-            for chunk in fastcdc(mapped, min_size=min_size, avg_size=avg_size,
-                                 max_size=max_size, fat=fat):
-                offset = getattr(chunk, "offset", None)
-                length = getattr(chunk, "length", None)
-                data = getattr(chunk, "data", None)
-                if data is None:
-                    if offset is None or length is None:
-                        raise RuntimeError("Unsupported fastcdc chunk object shape.")
-                    data = mapped[offset: offset + length]
-                if offset is None:
-                    offset = 0
-                if length is None:
-                    length = len(data)
-                yield offset, length, bytes(data)
+        blob = handle.read()
+
+    for chunk in fastcdc(blob, min_size=min_size, avg_size=avg_size,
+                         max_size=max_size, fat=fat):
+        offset = getattr(chunk, "offset", None)
+        length = getattr(chunk, "length", None)
+        data = getattr(chunk, "data", None)
+        if data is None or len(data) == 0:
+            if offset is None or length is None:
+                raise RuntimeError("Unsupported fastcdc chunk object shape.")
+            data = blob[offset: offset + length]
+        if offset is None:
+            offset = 0
+        if length is None:
+            length = len(data)
+        if len(data) != length:
+            data = blob[offset: offset + length]
+        if not data:
+            continue
+        yield offset, length, bytes(data)
 
 
 def main():
@@ -106,7 +109,6 @@ def main():
                     "tar_path": str(rel_tar_path).replace("\\", "/"),
                     "chunk_offset": offset,
                     "chunk_length": length,
-                    "payload_b64": base64.b64encode(payload).decode("ascii"),
                 }
                 out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 chunk_id += 1
